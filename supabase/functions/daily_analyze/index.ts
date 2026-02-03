@@ -1,6 +1,6 @@
 // Supabase Edge Function: Analyze lifelogs and generate summary + action items
-// Strategy: fetch lifelogs from Limitless API, create a lightweight summary,
-// extract action items via simple heuristics, and persist to Supabase.
+// Strategy: fetch lifelogs from Limitless API, summarize with Mistral if available,
+// extract action items, and persist to Supabase.
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -15,13 +15,11 @@ function extractActionItems(markdown: string): string[] {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
-    // Checkbox tasks
     if (trimmed.startsWith("- [ ]") || trimmed.startsWith("* [ ]")) {
       items.push(trimmed.replace(/^- \[ \]\s*|^\* \[ \]\s*/i, ""));
       continue;
     }
 
-    // Simple keywords
     if (/^(todo|follow up|follow-up|remember to|need to|next step)[:\s]/i.test(trimmed)) {
       items.push(trimmed.replace(/^(todo|follow up|follow-up|remember to|need to|next step)[:\s]*/i, ""));
       continue;
@@ -31,7 +29,7 @@ function extractActionItems(markdown: string): string[] {
   return Array.from(new Set(items)).filter((t) => t.length > 2);
 }
 
-function summarize(lifelogs: any[]): { summary: string; highlights: any } {
+function fallbackSummary(lifelogs: any[]): { summary: string; highlights: any } {
   if (!lifelogs.length) {
     return { summary: "No lifelogs found for this date.", highlights: {} };
   }
@@ -46,6 +44,46 @@ function summarize(lifelogs: any[]): { summary: string; highlights: any } {
       titles,
     },
   };
+}
+
+async function summarizeWithMistral(lifelogs: any[]): Promise<{ summary: string; highlights: any } | null> {
+  const apiKey = Deno.env.get("MISTRAL_API_KEY");
+  if (!apiKey) return null;
+
+  const content = lifelogs
+    .map((l: any) => `Title: ${l.title || "(untitled)"}\n${l.markdown || ""}`)
+    .join("\n---\n")
+    .slice(0, 8000);
+
+  const prompt = `Summarize the day in 5-8 bullet points, then list any action items.
+Return JSON with keys: summary (string), highlights (object with bullets array), action_items (array of strings).\n\n${content}`;
+
+  const res = await fetch("https://api.mistral.ai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "mistral-small-latest",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.2,
+    }),
+  });
+
+  if (!res.ok) return null;
+  const data = await res.json();
+  const text = data?.choices?.[0]?.message?.content || "";
+
+  try {
+    const parsed = JSON.parse(text);
+    return {
+      summary: parsed.summary || "",
+      highlights: parsed.highlights || {},
+    };
+  } catch (_e) {
+    return { summary: text, highlights: {} };
+  }
 }
 
 serve(async (req) => {
@@ -80,7 +118,10 @@ serve(async (req) => {
     const lifelogData = await lifelogRes.json();
     const lifelogs = lifelogData?.data?.lifelogs ?? [];
 
-    const { summary, highlights } = summarize(lifelogs);
+    let summaryPayload = await summarizeWithMistral(lifelogs);
+    if (!summaryPayload) summaryPayload = fallbackSummary(lifelogs);
+
+    const { summary, highlights } = summaryPayload;
 
     const markdownBlob = lifelogs.map((l: any) => l.markdown || "").join("\n");
     const actionItems = extractActionItems(markdownBlob);
@@ -89,7 +130,6 @@ serve(async (req) => {
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
     const supabase = createClient(supabaseUrl, serviceKey);
 
-    // Upsert summary
     const { error: summaryError } = await supabase
       .from("limitless_summaries")
       .upsert({
@@ -105,22 +145,16 @@ serve(async (req) => {
       });
     }
 
-    // Insert action items
     const insertedItems: any[] = [];
     for (const item of actionItems) {
       const { data: row, error } = await supabase
         .from("action_items")
-        .insert({
-          summary_date: date,
-          title: item,
-        })
+        .insert({ summary_date: date, title: item })
         .select()
         .single();
-
       if (!error && row) insertedItems.push(row);
     }
 
-    // Add to Kanban (Todo column)
     if (insertedItems.length) {
       const { data: columns } = await supabase
         .from("kanban_columns")
@@ -140,12 +174,7 @@ serve(async (req) => {
     }
 
     return new Response(
-      JSON.stringify({
-        ok: true,
-        summary_date: date,
-        summary,
-        action_items: actionItems,
-      }),
+      JSON.stringify({ ok: true, summary_date: date, summary, action_items: actionItems }),
       { headers: { "content-type": "application/json" } }
     );
   } catch (e) {

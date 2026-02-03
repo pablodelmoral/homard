@@ -4,6 +4,7 @@
 - `LIMITLESS_API_KEY`
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
+- `MISTRAL_API_KEY` (optional, for NLP summary)
 
 ## Deploy functions
 ```bash
