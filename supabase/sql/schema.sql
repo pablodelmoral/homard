@@ -1,18 +1,5 @@
 -- Limitless + Assistant schema
 
--- Lifelogs raw (optional)
-create table if not exists public.limitless_lifelogs (
-  id uuid primary key default gen_random_uuid(),
-  lifelog_id text unique not null,
-  start_time timestamptz,
-  end_time timestamptz,
-  title text,
-  markdown text,
-  raw jsonb,
-  created_at timestamptz default now(),
-  updated_at timestamptz default now()
-);
-
 -- Daily summaries
 create table if not exists public.limitless_summaries (
   id uuid primary key default gen_random_uuid(),
@@ -60,13 +47,13 @@ create table if not exists public.kanban_items (
 );
 
 -- Simple RLS setup (adjust later for auth)
-alter table public.limitless_lifelogs enable row level security;
+-- (no raw lifelog table)
 alter table public.limitless_summaries enable row level security;
 alter table public.action_items enable row level security;
 alter table public.kanban_columns enable row level security;
 alter table public.kanban_items enable row level security;
 
-create policy "read all" on public.limitless_lifelogs for select using (true);
+-- (no lifelog read policy)
 create policy "read all" on public.limitless_summaries for select using (true);
 create policy "read all" on public.action_items for select using (true);
 create policy "read all" on public.kanban_columns for select using (true);
